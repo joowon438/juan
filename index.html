@@ -178,7 +178,7 @@ function buildMesh(g){
     color: 0xffffff,
     roughness: pbr.roughnessFactor === undefined ? 1 : pbr.roughnessFactor,
     metalness: pbr.metallicFactor || 0,
-    side: src.doubleSided ? THREE.DoubleSide : THREE.FrontSide
+    side: THREE.DoubleSide
   });
 
   // The PNG/JPEG is stored inside the GLB; it is not a separate file.
