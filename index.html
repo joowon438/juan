@@ -618,7 +618,7 @@ if(document.fonts){
   })['catch'](function(){});
 }
 // Change this path to an absolute HTTPS GLB URL for external hosting if needed.
-var MODEL_URL = './261026_jw3_shapekey.glb';
+var MODEL_URL = './261026_jw3_shapekey2.glb';
 var boot = fetch(MODEL_URL).then(function(res){
   if(!res.ok) throw new Error('GLB load failed (HTTP '+res.status+'): '+MODEL_URL);
   return res.arrayBuffer();
