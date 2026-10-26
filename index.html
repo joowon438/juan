@@ -428,6 +428,75 @@ function spring(cur, vel, target, k, dt){
   return [cur, vel];
 }
 
+// Read and replay the original Blender glTF morph-weight animation.
+// A single glTF animation channel can animate ALL Shape Keys at once.
+var shapeKeyAnimation = null;
+function setupShapeKeyAnimation(g){
+  shapeKeyAnimation = null;
+  var animations = g.json.animations || [];
+  if(!mesh || !mesh.morphTargetInfluences || !mesh.morphTargetInfluences.length) return;
+  var count = mesh.morphTargetInfluences.length;
+  for(var a=0; a<animations.length; a++){
+    var anim = animations[a];
+    for(var c=0; c<(anim.channels || []).length; c++){
+      var channel = anim.channels[c];
+      if(!channel.target || channel.target.path !== 'weights') continue;
+      var sampler = anim.samplers[channel.sampler];
+      if(!sampler) continue;
+      var times = readAccessor(g, sampler.input);
+      var values = readAccessor(g, sampler.output);
+      if(times.length < 2) continue;
+      var interpolation = sampler.interpolation || 'LINEAR';
+      var stride = count * (interpolation === 'CUBICSPLINE' ? 3 : 1);
+      if(values.length !== times.length * stride){
+        console.warn('Shape Key animation has unexpected weights:', values.length, times.length, count);
+        continue;
+      }
+      shapeKeyAnimation = {
+        times: times, values: values, count: count,
+        interpolation: interpolation,
+        start: times[0], duration: times[times.length-1] - times[0]
+      };
+      console.log('Blender Shape Key animation:', anim.name || a,
+                  count, 'keys;', times.length, 'frames;',
+                  shapeKeyAnimation.duration.toFixed(2), 'seconds');
+      updateShapeKeyAnimation(0);
+      return;
+    }
+  }
+  console.warn('GLB has Shape Keys but no weight animation channel.');
+}
+function updateShapeKeyAnimation(elapsed){
+  var anim = shapeKeyAnimation;
+  if(!anim || !mesh || anim.duration <= 0) return;
+  var time = anim.start + ((elapsed % anim.duration) + anim.duration) % anim.duration;
+  var times = anim.times, values = anim.values, count = anim.count;
+  var lo = 0, hi = times.length - 1;
+  while(lo + 1 < hi){
+    var mid = (lo + hi) >> 1;
+    if(times[mid] <= time) lo = mid; else hi = mid;
+  }
+  var t0 = times[lo], t1 = times[hi];
+  var fraction = Math.max(0, Math.min(1, (time - t0) / Math.max(1e-8, t1 - t0)));
+  for(var k=0; k<count; k++){
+    var weight;
+    if(anim.interpolation === 'STEP'){
+      weight = values[lo*count+k];
+    }else if(anim.interpolation === 'CUBICSPLINE'){
+      var s = fraction, s2 = s*s, s3 = s2*s, span = t1-t0;
+      var base0 = lo*count*3, base1 = hi*count*3;
+      var p0 = values[base0+count+k], p1 = values[base1+count+k];
+      var outTangent = values[base0+2*count+k], inTangent = values[base1+k];
+      weight = (2*s3-3*s2+1)*p0 + (s3-2*s2+s)*span*outTangent
+             + (-2*s3+3*s2)*p1 + (s3-s2)*span*inTangent;
+    }else{
+      var v0 = values[lo*count+k], v1 = values[hi*count+k];
+      weight = v0 + (v1-v0)*fraction;
+    }
+    mesh.morphTargetInfluences[k] = Math.max(0, Math.min(1, weight));
+  }
+}
+
 var last = 0, simT = 0, running = false;
 function frame(now){
   requestAnimationFrame(frame);
@@ -436,11 +505,7 @@ function frame(now){
   last = now;
  simT += dt;
   spin += SPIN*dt;          // dt 를 곱하므로 프레임레이트와 무관하게 정확히 8°/s
-// 첫 번째 Shape Key 자동 애니메이션
-if (mesh && mesh.morphTargetInfluences?.length) {
-  mesh.morphTargetInfluences[0] =
-    (Math.sin(simT * Math.PI / 2) + 1) / 2;
-}
+updateShapeKeyAnimation(simT);
     // ptr.on 조건을 뺐다 → 커서가 나가도 ptr.x/ptr.y 가 마지막 값을 들고 있어 각도가 유지된다
   if(!ptr.on){ lastPx = null; aimX = 0; }   // 벗어나면 위아래 0으로, 재진입 시 튐 방지
   var ty = aimY;                            // 좌우는 누적값 유지
@@ -491,8 +556,11 @@ var prim = g.json.meshes[0].primitives[0];
 if (prim.targets && prim.targets.length) {
   geo.morphTargetsRelative = true;
   geo.morphAttributes.position = [];
+  var targetNames = (g.json.meshes[0].extras || {}).targetNames || [];
+  var hasMorphNormals = prim.targets.every(function(t){ return t.NORMAL !== undefined; });
+  if(hasMorphNormals) geo.morphAttributes.normal = [];
 
-  prim.targets.forEach(function(target) {
+  prim.targets.forEach(function(target, index) {
     if (target.POSITION === undefined) return;
 
     var raw = readAccessor(g, target.POSITION);
@@ -502,16 +570,24 @@ if (prim.targets && prim.targets.length) {
       delta[i] = raw[i] * S;
     }
 
-    geo.morphAttributes.position.push(
-      new THREE.Float32BufferAttribute(delta, 3)
-    );
+    var attr = new THREE.Float32BufferAttribute(delta, 3);
+    attr.name = targetNames[index] || String(index);
+    geo.morphAttributes.position.push(attr);
+    if(hasMorphNormals){
+      var normalDelta = readAccessor(g, target.NORMAL);
+      var normalAttr = new THREE.Float32BufferAttribute(normalDelta, 3);
+      normalAttr.name = attr.name;
+      geo.morphAttributes.normal.push(normalAttr);
+    }
   });
 
   mesh.material.morphTargets = true;
+  mesh.material.morphNormals = hasMorphNormals;
   mesh.material.needsUpdate = true;
   mesh.updateMorphTargets();
 
   console.log('Shape Keys loaded:', mesh.morphTargetInfluences.length);
+  setupShapeKeyAnimation(g);
 }
 
 geo.computeBoundingBox();
@@ -556,6 +632,9 @@ window.__ijc = {
     return {size:size, fit:fit, zoom:zoom, rot:rot, ptr:ptr, simT:simT,
             camZ:camera.position.z, fov:FOV, base:BASE_FRAC,
             reachY:REACH_Y, reachX:REACH_X,
+            shapeKeys: mesh && mesh.morphTargetInfluences ? mesh.morphTargetInfluences.slice() : [],
+            shapeKeyNames: mesh && mesh.morphTargetDictionary ? Object.keys(mesh.morphTargetDictionary) : [],
+            animationSeconds: shapeKeyAnimation ? shapeKeyAnimation.duration : 0,
             verts: mesh ? mesh.geometry.attributes.position.count : 0,
             tris: mesh && mesh.geometry.index ? mesh.geometry.index.count/3 : 0,
             coloured: !!(mesh && mesh.geometry.attributes.color),
